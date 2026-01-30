@@ -1,0 +1,132 @@
+# =============================================================================
+# Custom Suricata Rules for Enterprise Network Protection
+# Cyber Pro Final Project - Haddar DeMerchant & Georgy Strenov
+# July 2023
+# =============================================================================
+#
+# These rules detect attack patterns observed during penetration testing
+# against a Windows Active Directory environment. Rules are sourced from
+# Emerging Threats rulesets and configured for detection of:
+#   - HTA (HTML Application) malware delivery
+#   - PowerShell-based attack stages
+#   - Metasploit framework payloads
+#   - Suspicious HTTP traffic patterns
+#
+# Deployment: Copy to /var/lib/suricata/rules/ and enable in suricata.yaml
+# Interface: Configure on LAN interface for internal traffic monitoring
+# Mode: IDS (alert) or IPS (drop) based on requirements
+#
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# SECTION 1: HTA Application Download Detection
+# Purpose: Detect delivery of malicious HTML Applications via HTTP
+# Attack Phase: Initial Access (T1566 - Phishing)
+# -----------------------------------------------------------------------------
+
+# Rule 2027261 - Detects HTA requests to dotted quad (IP) hosts
+# Attackers often use raw IPs instead of domains to avoid DNS-based detection
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET INFO Dotted Quad Host HTA Request"; flow:established,to_server; http.host; content:"."; pcre:"/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}/"; http.uri; content:".hta"; nocase; endswith; classtype:misc-activity; sid:2027261; rev:3;)
+
+# Rule 2022520 - Detects potential HTA application downloads
+# HTA files are commonly used for initial compromise due to script execution
+alert http $HOME_NET any -> $EXTERNAL_NET any (msg:"ET POLICY Possible HTA Application Download"; flow:established,to_client; file_data; content:"<HTA:APPLICATION"; nocase; classtype:policy-violation; sid:2022520; rev:5;)
+
+# -----------------------------------------------------------------------------
+# SECTION 2: PowerShell Stager Detection
+# Purpose: Detect PowerShell-based malware and attack stages
+# Attack Phase: Execution (T1059.001 - PowerShell)
+# -----------------------------------------------------------------------------
+
+# Rule 2024196 - Detects HTA files with WScript.Shell calls (CVE-2017-0199 related)
+# WScript.Shell enables command execution from HTA/Office documents
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET WEB_CLIENT HTA File containing Wscript.Shell Call - Potential CVE-2017-0199"; flow:established,to_client; file_data; content:"WScript.Shell"; nocase; content:"<HTA:APPLICATION"; nocase; distance:0; classtype:attempted-user; sid:2024196; rev:4;)
+
+# Rule 2025061 - Detects PowerShell invocation pattern 1
+# Common in fileless malware and post-exploitation frameworks
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET WEB_CLIENT PowerShell call in script 1"; flow:established,to_client; file_data; content:"powershell"; nocase; pcre:"/powershell[^\n]*\-[ew]/i"; classtype:attempted-user; sid:2025061; rev:3;)
+
+# Rule 2025062 - Detects PowerShell invocation pattern 2
+# Catches alternative PowerShell invocation methods
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET WEB_CLIENT PowerShell call in script 2"; flow:established,to_client; file_data; content:"powershell"; nocase; pcre:"/powershell\.exe/i"; classtype:attempted-user; sid:2025062; rev:3;)
+
+# Rule 2026988 - Detects PowerShell NoProfile command (stager indicator)
+# NoProfile bypasses user profile, common in automated attacks
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET ATTACK_RESPONSE PowerShell NoProfile Command Received In Powershell Stagers"; flow:established,to_client; file_data; content:"powershell"; nocase; content:"-NoP"; nocase; distance:0; within:30; classtype:bad-unknown; sid:2026988; rev:2;)
+
+# Rule 2026989 - Detects PowerShell hidden window command (stager indicator)
+# Hidden windows prevent user awareness of malicious activity
+alert http $EXTERNAL_NET any -> $HOME_NET any (msg:"ET HUNTING PowerShell Hidden Window Command Common In Powershell Stagers M1"; flow:established,to_client; file_data; content:"powershell"; nocase; content:"-W"; nocase; distance:0; within:30; content:"Hidden"; nocase; distance:0; within:15; classtype:bad-unknown; sid:2026989; rev:2;)
+
+# -----------------------------------------------------------------------------
+# SECTION 3: Malware and Payload Detection
+# Purpose: Detect Metasploit and other common attack frameworks
+# Attack Phase: Command and Control (TA0011)
+# -----------------------------------------------------------------------------
+
+# Rule 2035480 - Detects PE executable download over raw TCP
+# Legitimate software rarely downloads executables this way
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"ET HUNTING PE EXE Download over raw TCP"; flow:established,to_client; content:"MZ"; offset:0; depth:2; content:"This program"; distance:50; within:100; classtype:misc-activity; sid:2035480; rev:2;)
+
+# Rule 2025644 - Detects Metasploit payload construction patterns
+# Identifies common Metasploit bind_api shellcode structure
+alert tcp $EXTERNAL_NET any -> $HOME_NET any (msg:"ET MALWARE Possible Metasploit Payload Common Construct Bind_API (from server)"; flow:established,to_client; content:"|60 89 e5 31 c0 64 8b 50 30 8b 52 0c 8b 52 14|"; classtype:trojan-activity; sid:2025644; rev:5;)
+
+# -----------------------------------------------------------------------------
+# SECTION 4: Protocol Anomaly Detection
+# Purpose: Detect suspicious protocol usage and evasion techniques
+# Attack Phase: Defense Evasion (TA0005)
+# -----------------------------------------------------------------------------
+
+# Rule 2260003 - Detects when application layer protocol detection is skipped
+# May indicate protocol manipulation or tunneling
+alert ip any any -> any any (msg:"SURICATA Applayer Protocol detection skipped"; flow:established; app-layer-event:applayer_proto_detection_skipped; classtype:protocol-command-decode; sid:2260003; rev:1;)
+
+# Rule 2006408 - Detects HTTP requests on non-standard ports
+# Attackers use alternate ports to evade basic web filtering
+alert http $HOME_NET any -> $EXTERNAL_NET !$HTTP_PORTS (msg:"ET POLICY HTTP Request on Unusual Port Possibly Hostile"; flow:established,to_server; classtype:bad-unknown; sid:2006408; rev:13;)
+
+# =============================================================================
+# DEPLOYMENT NOTES
+# =============================================================================
+#
+# 1. IDS Mode (Detection Only):
+#    - Set all rules to "alert" action
+#    - Monitor Suricata alerts via pfSense GUI or eve.json
+#    - Useful for initial tuning to avoid false positives
+#
+# 2. IPS Mode (Active Blocking):
+#    - Enable "Block Offenders" in Suricata LAN interface settings
+#    - Select "Legacy Mode" for IPS operation
+#    - Set "Which IP to Block" to DST to block external attackers
+#    - Caution: Test thoroughly to avoid blocking legitimate traffic
+#
+# 3. Variables to Configure in suricata.yaml:
+#    $HOME_NET = Internal network (e.g., 192.168.7.0/24)
+#    $EXTERNAL_NET = !$HOME_NET (everything external)
+#    $HTTP_PORTS = Standard HTTP ports (80, 8080, etc.)
+#
+# 4. Logging:
+#    - Alerts logged to /var/log/suricata/eve.json
+#    - Fast log available at /var/log/suricata/fast.log
+#    - pfSense GUI provides alert dashboard
+#
+# =============================================================================
+# MITRE ATT&CK MAPPING
+# =============================================================================
+#
+# | SID     | Tactic           | Technique    | Description                  |
+# |---------|------------------|--------------|------------------------------|
+# | 2027261 | Initial Access   | T1566        | HTA delivery detection       |
+# | 2022520 | Initial Access   | T1566        | HTA download detection       |
+# | 2024196 | Execution        | T1059.001    | WScript.Shell/PowerShell     |
+# | 2025061 | Execution        | T1059.001    | PowerShell execution         |
+# | 2025062 | Execution        | T1059.001    | PowerShell execution         |
+# | 2026988 | Execution        | T1059.001    | PowerShell stager            |
+# | 2026989 | Defense Evasion  | T1564.003    | Hidden window execution      |
+# | 2035480 | Command & Control| T1105        | Executable download          |
+# | 2025644 | Command & Control| T1571        | Metasploit C2                |
+# | 2260003 | Defense Evasion  | T1001        | Protocol anomaly             |
+# | 2006408 | Command & Control| T1571        | Non-standard port usage      |
+#
+# =============================================================================
